@@ -375,7 +375,11 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
 
     prev_text = ""
     transport = httpx.HTTPTransport(proxy=proxy) if proxy else None
-    with httpx.Client(transport=transport, timeout=CONFIG["request_timeout_sec"], verify=True) as client:
+    # Connection: close disables keep-alive reuse — the proxy/upstream kills
+    # idle connections, and reusing a dead one fails mid-stream with
+    # "[SSL] record layer failure", which corrupts streaming responses.
+    with httpx.Client(transport=transport, timeout=CONFIG["request_timeout_sec"], verify=True,
+                      headers={"Connection": "close"}) as client:
         try:
             with client.stream("POST", url, content=body, headers=headers) as resp:
                 resp.raise_for_status()
