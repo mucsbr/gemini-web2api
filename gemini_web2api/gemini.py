@@ -7,6 +7,7 @@ import random
 import threading
 import urllib.request
 import urllib.parse
+import urllib.error
 import ssl
 import os
 import hashlib
@@ -66,13 +67,13 @@ def _get_httpx_client():
 
 
 def load_cookie() -> tuple:
-    """Load cookie from file with mtime-based caching."""
+    """Load cookie from file with mtime/size-based caching."""
     cookie_file = CONFIG.get("cookie_file")
     if not cookie_file or not os.path.exists(cookie_file):
         return "", None
     try:
-        mtime = os.path.getmtime(cookie_file)
-        if mtime == _cookie_cache["mtime"] and _cookie_cache["str"]:
+        st = os.stat(cookie_file)
+        if (st.st_mtime, st.st_size) == (_cookie_cache["mtime"], _cookie_cache.get("size", -1)) and _cookie_cache["str"]:
             return _cookie_cache["str"], _cookie_cache["sapisid"]
         with open(cookie_file, "r") as f:
             content = f.read().strip()
@@ -90,15 +91,64 @@ def load_cookie() -> tuple:
                 CONFIG["auth_user"] = data["auth_user"]
             if data.get("gemini_bl"):
                 CONFIG["gemini_bl"] = data["gemini_bl"]
+        elif "# Netscape HTTP Cookie File" in content or content.startswith("#HttpOnly_"):
+            # Netscape cookies.txt (tab-separated: domain, flag, path, secure, expiry, name, value)
+            pairs = {}
+            for line in content.splitlines():
+                if line.startswith("#HttpOnly_"):
+                    line = line[len("#HttpOnly_"):]
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) != 7:
+                    continue
+                pairs[parts[5]] = parts[6]
+            cookie_str = "; ".join(f"{k}={v}" for k, v in pairs.items())
+            sapisid = pairs.get("SAPISID", "")
         else:
             cookie_str = content
             pairs = dict(p.split("=", 1) for p in cookie_str.split("; ") if "=" in p)
             sapisid = pairs.get("SAPISID", "")
-        _cookie_cache.update({"str": cookie_str, "sapisid": sapisid or None, "mtime": mtime})
+        _cookie_cache.update({"str": cookie_str, "sapisid": sapisid or None, "mtime": st.st_mtime, "size": st.st_size})
         return cookie_str, sapisid if sapisid else None
     except Exception as e:
         log(f"Cookie load error: {e}")
         return _cookie_cache["str"], _cookie_cache["sapisid"]
+
+
+def refresh_bl_and_xsrf() -> bool:
+    """Fetch the app page with cookies; refresh gemini_bl and xsrf_token (SNlM0e).
+    Returns True if either value changed."""
+    old_bl = CONFIG["gemini_bl"]
+    old_xsrf = CONFIG.get("xsrf_token")
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        cookie_str, _ = load_cookie()
+        if cookie_str:
+            headers["Cookie"] = cookie_str
+        req = urllib.request.Request("https://gemini.google.com/app", headers=headers)
+        proxy = CONFIG.get("proxy")
+        ctx = _get_ssl_ctx()
+        if proxy:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy}),
+                urllib.request.HTTPSHandler(context=ctx))
+            resp = opener.open(req, timeout=15)
+        else:
+            resp = urllib.request.urlopen(req, context=ctx, timeout=15)
+        html = resp.read().decode("utf-8", errors="replace")
+        m = re.search(r'"SNlM0e":"([^"]+)"', html)
+        if m:
+            CONFIG["xsrf_token"] = m.group(1)
+        m = re.search(r'(boq_assistant-bard-web-server_\d+\.\d+_p\d+)', html)
+        if m:
+            CONFIG["gemini_bl"] = m.group(1)
+    except Exception as e:
+        log(f"BL/XSRF refresh failed: {e}")
+    changed = CONFIG["gemini_bl"] != old_bl or CONFIG.get("xsrf_token") != old_xsrf
+    if changed:
+        log(f"BL/XSRF refreshed: xsrf {'new' if CONFIG.get('xsrf_token') != old_xsrf else 'unchanged'}, bl {old_bl} -> {CONFIG['gemini_bl']}")
+    return changed
 
 
 def make_sapisidhash(sapisid: str) -> str:
@@ -265,6 +315,14 @@ def _best_main_answer(line: str):
     return best or None
 
 
+BARD_ERROR_HINTS = {
+    1060: "IP temporarily blocked or region not supported - use a proxy/different network or wait",
+    1037: "usage limit exceeded",
+    1013: "temporary upstream error, retry later",
+    1185: "upstream rejected request",
+}
+
+
 def extract_response_text(raw: str) -> str:
     """Parse full response to get the final answer text.
 
@@ -276,9 +334,10 @@ def extract_response_text(raw: str) -> str:
     Never the thought/draft/chip frames, which previously won the "longest
     text anywhere" heuristic and produced unrelated answers.
     """
-    bard_err = re.search(r'BardErrorInfo\s*\[(\d+)\]', raw)
+    bard_err = re.search(r'BardErrorInfo"?,?\s*\[(\d+)\]', raw)
     if bard_err:
-        raise RuntimeError(f"Gemini upstream rejected request: BardErrorInfo [{bard_err.group(1)}]")
+        code = int(bard_err.group(1))
+        raise RuntimeError(f"Gemini upstream error [{code}]: {BARD_ERROR_HINTS.get(code, 'upstream rejected request')}")
     main_best = ""
     any_best = ""
     for line in raw.split("\n"):
@@ -297,14 +356,15 @@ def extract_response_text(raw: str) -> str:
 
 def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None) -> str:
     """Non-streaming generation with retry."""
-    body = _build_payload(prompt, model_id, think_mode, file_refs, extra_fields).encode()
-    headers = _build_headers()
     ctx = _get_ssl_ctx()
     proxy = CONFIG.get("proxy")
 
     last_err = None
     for attempt in range(CONFIG["retry_attempts"]):
         try:
+            # Rebuilt per attempt so a BL/XSRF refresh takes effect on retry.
+            body = _build_payload(prompt, model_id, think_mode, file_refs, extra_fields).encode()
+            headers = _build_headers()
             req = urllib.request.Request(_get_url(), data=body, headers=headers, method="POST")
             if proxy:
                 opener = urllib.request.build_opener(
@@ -316,6 +376,17 @@ def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None
                 resp = urllib.request.urlopen(req, context=ctx, timeout=CONFIG["request_timeout_sec"])
             raw = resp.read().decode("utf-8", errors="replace")
             return extract_response_text(raw)
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                raise RuntimeError("Gemini upstream rate-limited this IP (HTTP 429); retrying immediately would extend the block")
+            if e.code in (400, 405) and refresh_bl_and_xsrf():
+                log("Retrying with refreshed BL/XSRF...")
+                last_err = e
+                continue
+            last_err = e
+            if attempt < CONFIG["retry_attempts"] - 1:
+                log(f"Retry {attempt+1}/{CONFIG['retry_attempts']}: {e}")
+                time.sleep(CONFIG["retry_delay_sec"])
         except Exception as e:
             last_err = e
             if attempt < CONFIG["retry_attempts"] - 1:
@@ -339,8 +410,6 @@ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list
             yield text
         return
 
-    body = _build_payload(prompt, model_id, think_mode, file_refs, extra_fields)
-    headers = _build_headers()
     client = _get_httpx_client()
 
     last_err = None
@@ -349,16 +418,20 @@ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list
         emitted_any = False
         raw_lines = []
         try:
+            # Rebuilt per attempt so a BL/XSRF refresh takes effect on retry.
+            body = _build_payload(prompt, model_id, think_mode, file_refs, extra_fields)
+            headers = _build_headers()
             with client.stream("POST", _get_url(), content=body, headers=headers) as resp:
                 resp.raise_for_status()
                 buf = ""
                 for chunk in resp.iter_text():
                     buf += chunk
                     if "BardErrorInfo" in buf:
-                        bard_err = re.search(r'BardErrorInfo\s*\[(\d+)\]', buf)
+                        bard_err = re.search(r'BardErrorInfo"?,?\s*\[(\d+)\]', buf)
                         if bard_err:
+                            code = int(bard_err.group(1))
                             raise RuntimeError(
-                                f"Gemini upstream rejected request: BardErrorInfo [{bard_err.group(1)}]"
+                                f"Gemini upstream error [{code}]: {BARD_ERROR_HINTS.get(code, 'upstream rejected request')}"
                             )
                     while "\n" in buf:
                         line, buf = buf.split("\n", 1)
@@ -389,6 +462,15 @@ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list
                     return
             last_err = RuntimeError("no answer frame in Gemini stream response")
         except Exception as e:
+            # Hard upstream rejections (BardErrorInfo) - retrying is futile,
+            # except 1013 which is transient per upstream behavior.
+            if "Gemini upstream error" in str(e) and "[1013]" not in str(e):
+                raise
+            status = getattr(getattr(e, "response", None), "status_code", 0)
+            if status in (400, 405) and not emitted_raw_text and refresh_bl_and_xsrf():
+                log("Stream retrying with refreshed BL/XSRF...")
+                last_err = e
+                continue
             if emitted_any:
                 # Partial content already streamed: a retry would either fail the
                 # prefix check or splice two different generations together, so end
