@@ -111,6 +111,8 @@ each share a key-id/UUID pair.
 Current model list tracks the **web UI** (6 models, Sep 2026): Flash 3.6
 (`3.6-flash`, `3.6-flash-thinking`), Lite 3.5 (`3.5-flash-lite`,
 `3.5-flash-thinking-lite`), Pro 3.1 (`3.1-pro`, `3.1-pro-thinking`).
+`3.8-flash`/`3.7-flash` are kept as aliases of `3.6-flash` — the point
+version is a label; routing is decided by (family, variant) only.
 The `3.x` in the name is just a label — routing is decided by the ticket
 `(family, variant)`; the server serves the family's current default. Unknown
 names → fallback to `default_model`. Removed: `auto`, `3.8-flash`,

@@ -78,6 +78,8 @@ gemini
 
 | 模型 | 说明 | 输出 |
 |------|------|--------|
+| `gemini-3.8-flash` | 3.6-flash 别名 — 路由相同, 服务端返回当前 Flash 默认 | ~1.2万字符 |
+| `gemini-3.7-flash` | 3.6-flash 别名 — 路由相同 | ~1.2万字符 |
 | `gemini-3.6-flash` | 全能模型 (网页版 Flash) | ~1.2万字符 |
 | `gemini-3.6-flash-thinking` | Flash 扩展思考 | **~2万字符** |
 | `gemini-3.5-flash-lite` | 高性价比、大容量 | ~1万字符 |

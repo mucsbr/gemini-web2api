@@ -22,6 +22,14 @@
 TICKET_HEADER = "X-Goog-Ext-525001261-Jspb"
 
 MODELS = {
+    "gemini-3.8-flash": {
+        "mode": 1, "think": 4, "variant": 1, "ticket": "flash",
+        "desc": "Alias for gemini-3.6-flash (point version is a label; same routing)",
+    },
+    "gemini-3.7-flash": {
+        "mode": 1, "think": 4, "variant": 1, "ticket": "flash",
+        "desc": "Alias for gemini-3.6-flash (point version is a label; same routing)",
+    },
     "gemini-3.6-flash": {
         "mode": 1, "think": 4, "variant": 1, "ticket": "flash",
         "desc": "All-around model (Gemini 3.6 Flash)",

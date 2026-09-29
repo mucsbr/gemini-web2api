@@ -88,6 +88,8 @@ Supports Google native API endpoints:
 
 | Model | Description | Output |
 |-------|-------------|--------|
+| `gemini-3.8-flash` | Alias for 3.6-flash — same routing, server serves its current Flash default | ~12k chars |
+| `gemini-3.7-flash` | Alias for 3.6-flash — same routing | ~12k chars |
 | `gemini-3.6-flash` | All-around model (web UI Flash) | ~12k chars |
 | `gemini-3.6-flash-thinking` | Extended thinking on Flash | **~20k chars** |
 | `gemini-3.5-flash-lite` | Cost-efficient, high capacity | ~10k chars |
