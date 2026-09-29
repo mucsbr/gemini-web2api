@@ -116,14 +116,14 @@ class StreamingToolCallsTests(unittest.TestCase):
         connection.close()
         return response.status, body
 
-    @mock.patch("gemini_web2api.server.generate")
-    def test_streamed_tool_calls_carry_index_and_reassemble(self, generate):
+    @mock.patch("gemini_web2api.server.generate_stream")
+    def test_streamed_tool_calls_carry_index_and_reassemble(self, generate_stream):
         args = {"filePath": "pyproject.toml", "extra": "x" * 300}
-        generate.return_value = (
+        generate_stream.return_value = iter([
             '```tool_call\n'
             + json.dumps({"name": "read", "arguments": args})
             + '\n```'
-        )
+        ])
         status, body = self.post_json("/v1/chat/completions", {
             "model": "gemini-3.6-flash",
             "messages": [{"role": "user", "content": "read the file"}],
@@ -158,9 +158,9 @@ class StreamingToolCallsTests(unittest.TestCase):
         self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "tool_calls")
         self.assertTrue(body.endswith("data: [DONE]\n\n"))
 
-    @mock.patch("gemini_web2api.server.generate")
-    def test_streamed_unknown_tool_filtered(self, generate):
-        generate.return_value = '```tool_call\n{"name": "evil", "arguments": {}}\n```'
+    @mock.patch("gemini_web2api.server.generate_stream")
+    def test_streamed_unknown_tool_filtered(self, generate_stream):
+        generate_stream.return_value = iter(['```tool_call\n{"name": "evil", "arguments": {}}\n```'])
         status, body = self.post_json("/v1/chat/completions", {
             "model": "gemini-3.6-flash",
             "messages": [{"role": "user", "content": "hi"}],

@@ -13,6 +13,9 @@ from .tools import messages_to_prompt, parse_tool_calls, google_contents_to_prom
 from .multimodal import detect_image_mime, fetch_image_bytes, upload_image
 from . import __version__
 
+# Fence marker the model is instructed to wrap tool calls in (see tools.py).
+TOOL_CALL_MARKER = "```tool_call"
+
 
 def _usage(prompt: str, text: str) -> dict:
     p = len(prompt) // 4
@@ -173,37 +176,6 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
     # ─── /v1/chat/completions ─────────────────────────────────────────────────
 
-    def _chunk(self, cid, model_name, delta, finish_reason=None):
-        return {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
-                "model": model_name,
-                "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
-
-    def _stream_tool_calls(self, cid, model_name, tool_calls, arg_slice=120):
-        """Emit tool calls as OpenAI-spec streaming deltas.
-
-        Each call gets an `index` (required by clients to assemble split
-        arguments), followed by argument slices, then a `tool_calls`
-        finish chunk.
-        """
-        self.wfile.write(
-            f"data: {json.dumps(self._chunk(cid, model_name, {'role': 'assistant'}), ensure_ascii=False)}\n\n".encode())
-        for i, tc in enumerate(tool_calls):
-            fn = tc.get("function", {})
-            head = {"role": "assistant",
-                    "tool_calls": [{"index": i, "id": tc.get("id"), "type": "function",
-                                    "function": {"name": fn.get("name", ""), "arguments": ""}}]}
-            self.wfile.write(
-                f"data: {json.dumps(self._chunk(cid, model_name, head), ensure_ascii=False)}\n\n".encode())
-            args = fn.get("arguments", "") or ""
-            for j in range(0, len(args), arg_slice):
-                piece = {"tool_calls": [{"index": i, "function": {"arguments": args[j:j + arg_slice]}}]}
-                self.wfile.write(
-                    f"data: {json.dumps(self._chunk(cid, model_name, piece), ensure_ascii=False)}\n\n".encode())
-        self.wfile.write(
-            f"data: {json.dumps(self._chunk(cid, model_name, {}, 'tool_calls'))}\n\n".encode())
-        self.wfile.write(b"data: [DONE]\n\n")
-        self.wfile.flush()
-
     def _handle_chat(self, body: bytes):
         req = self._parse_body(body)
         if req is None:
@@ -224,6 +196,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return
 
         stream = req.get("stream", False)
+        log(f"Chat completions: stream={stream}, tools={len(tools) if tools else 0}, model={model_name}")
         cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         try:
             file_refs = _upload_images(images)
@@ -272,6 +245,89 @@ class GeminiHandler(BaseHTTPRequestHandler):
                     pass
             return
 
+        if stream:
+            # Tools present + streaming: forward prose deltas in real time,
+            # but hold back ```tool_call fenced blocks (including a fence start
+            # straddling delta boundaries) so they can be parsed into OpenAI
+            # tool_calls at end of stream instead of leaking into chat text.
+            self._start_sse()
+            first_chunk = {
+                "id": cid,
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model_name,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant"},
+                    "finish_reason": None,
+                }],
+            }
+            self.wfile.write(f"data: {json.dumps(first_chunk)}\n\n".encode())
+            self.wfile.flush()
+
+            def send_delta(content=None, tool_calls=None, finish=None):
+                delta = {}
+                if content is not None:
+                    delta["content"] = content
+                if tool_calls:
+                    delta["tool_calls"] = tool_calls
+                chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
+                         "model": model_name, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+                self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())
+                self.wfile.flush()
+
+            full_text = ""
+            emitted = 0
+            finish = "stop"
+            try:
+                for delta in generate_stream(prompt, model_id, think_mode, file_refs, extra_fields, ticket):
+                    full_text += delta
+                    marker_pos = full_text.find(TOOL_CALL_MARKER)
+                    # Without a marker, hold back the last len(marker)-1 chars so a
+                    # fence start split across deltas is not forwarded prematurely.
+                    limit = marker_pos if marker_pos != -1 else len(full_text) - len(TOOL_CALL_MARKER) + 1
+                    if limit > emitted:
+                        send_delta(content=full_text[emitted:limit])
+                        emitted = limit
+                clean, tool_calls = parse_tool_calls(full_text, tool_names(tools))
+                if tool_calls:
+                    log(f"Chat tool-fenced streaming: parsed {len(tool_calls)} tool call(s)")
+                    if len(clean) > emitted:
+                        send_delta(content=clean[emitted:])
+                    for i, tc in enumerate(tool_calls):
+                        send_delta(tool_calls=[{
+                            "index": i,
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["function"]["name"],
+                                "arguments": tc["function"]["arguments"],
+                            },
+                        }])
+                    finish = "tool_calls"
+                else:
+                    # No (or malformed) tool call: forward whatever is still
+                    # buffered, raw, so nothing disappears silently.
+                    if len(full_text) > emitted:
+                        send_delta(content=full_text[emitted:])
+                send_delta(finish=finish)
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as e:
+                log(f"Stream error: {e}")
+                # Emit finish chunk so clients don't hang on a dropped stream
+                try:
+                    err_chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
+                                 "model": model_name, "choices": [{"index": 0, "delta": {"content": f"[error] {e}"}, "finish_reason": "stop"}]}
+                    self.wfile.write(f"data: {json.dumps(err_chunk, ensure_ascii=False)}\n\n".encode())
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                except Exception:
+                    pass
+            return
+
         try:
             text = generate(prompt, model_id, think_mode, file_refs, extra_fields, ticket)
         except Exception as e:
@@ -286,18 +342,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             msg["tool_calls"] = tool_calls
         finish = "tool_calls" if tool_calls else "stop"
 
-        if stream:
-            self._start_sse()
-            if tool_calls:
-                self._stream_tool_calls(cid, model_name, tool_calls)
-            else:
-                chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
-                         "model": model_name, "choices": [{"index": 0, "delta": msg, "finish_reason": finish}]}
-                self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())
-                self.wfile.write(b"data: [DONE]\n\n")
-                self.wfile.flush()
-        else:
-            self.send_json({
+        self.send_json({
                 "id": cid, "object": "chat.completion", "created": int(time.time()),
                 "model": model_name,
                 "choices": [{"index": 0, "message": msg, "finish_reason": finish}],
