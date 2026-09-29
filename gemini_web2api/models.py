@@ -1,46 +1,65 @@
-"""Model definitions and mapping from Gemini frontend JS source."""
+"""Model definitions and mapping from Gemini frontend StreamGenerate payloads."""
 
-# MODE_CATEGORY enum from 028-6eb337387583.js:
-#   1=FAST, 2=THINKING, 3=PRO, 4=AUTO, 5=FAST_DYNAMIC_THINKING, 6=FLASH_LITE
+# Model selection uses TWO fields in the f.req inner array (decoded from live
+# browser captures, Sep 2026):
+#   inner[79] = family: 1=flash, 3=pro, 4=auto, 5=dynamic-thinking, 6=flash-lite
+#   inner[80] = variant: 1=standard, 2=extended/thinking
+# E.g. 3.1 Pro=(3,1), 3.1 Pro Extended=(3,2), Flash Extended=(1,2),
+# Flash-Lite=(6,1), Flash-Lite Extended=(6,2).
+# HOWEVER: the server only honors these fields when the request also carries
+# the per-model ticket header X-Goog-Ext-525001261-Jspb (minted by the browser
+# per model family; embeds family/variant in plaintext). Without the ticket
+# the server falls back to the account default regardless of [79]/[80].
+# The ticket wins over the body fields when both are present.
+# Note: no field selects the exact 3.x point version within a family; the
+# server picks its current default (e.g. requesting "3.5-flash" yields 3.6 Flash).
+
+# Model list mirrors the Gemini web UI (Sep 2026): Flash 3.6 (+Extended) /
+# Flash-Lite 3.5 (+Extended) / Pro 3.1 (+Extended). The "3.x" in the name is
+# just a label — routing is decided by the ticket (family, variant), so the
+# server serves its current family default regardless of point version.
+
+TICKET_HEADER = "X-Goog-Ext-525001261-Jspb"
 
 MODELS = {
-    "gemini-3.7-flash": {
-        "mode": 1, "think": 4,
-        "desc": "Latest all-around model (Gemini 3.7 Flash)",
-    },
     "gemini-3.6-flash": {
-        "mode": 1, "think": 4,
+        "mode": 1, "think": 4, "variant": 1, "ticket": "flash",
         "desc": "All-around model (Gemini 3.6 Flash)",
     },
-    "gemini-3.5-flash": {
-        "mode": 1, "think": 4,
-        "desc": "Alias for gemini-3.6-flash (backend upgraded)",
+    "gemini-3.6-flash-thinking": {
+        "mode": 1, "think": 1, "variant": 2, "ticket": "flash-thinking",
+        "desc": "Extended thinking on Flash (~20k chars)",
     },
-    "gemini-3.5-flash-thinking": {
-        "mode": 2, "think": 0,
-        "desc": "Deep thinking mode, longest output (~20k chars)",
-    },
-    "gemini-3.1-pro": {
-        "mode": 3, "think": 4,
-        "desc": "Pro model (requires cookie for real routing)",
-    },
-    "gemini-3.1-pro-enhanced": {
-        "mode": 3, "think": 4, "extra": {31: 2, 80: 3},
-        "desc": "Pro with enhanced output (experimental)",
-    },
-    "gemini-auto": {
-        "mode": 4, "think": 4,
-        "desc": "Auto model selection",
+    "gemini-3.5-flash-lite": {
+        "mode": 6, "think": 4, "variant": 1, "ticket": "lite",
+        "desc": "Cost-efficient high-capacity model (Gemini 3.5 Flash-Lite)",
     },
     "gemini-3.5-flash-thinking-lite": {
-        "mode": 5, "think": 0,
-        "desc": "Dynamic thinking with adaptive depth",
+        "mode": 5, "think": 1, "variant": 2, "ticket": "lite-thinking",
+        "desc": "Extended thinking on Flash-Lite",
     },
-    "gemini-flash-lite": {
-        "mode": 6, "think": 4,
-        "desc": "Lightweight fast model",
+    "gemini-3.1-pro": {
+        "mode": 3, "think": 4, "variant": 1, "ticket": "pro",
+        "desc": "Pro model (requires cookie for real routing)",
+    },
+    "gemini-3.1-pro-thinking": {
+        "mode": 3, "think": 1, "variant": 2, "ticket": "pro-thinking",
+        "desc": "Extended thinking on Pro",
     },
 }
+
+
+def ticket_for(model_name: str):
+    """Return the upstream ticket header value for a model, or None.
+
+    Looks up the model's ticket key in CONFIG["model_tickets"].
+    """
+    from .config import CONFIG
+    cfg = MODELS.get(model_name) or {}
+    key = cfg.get("ticket")
+    if not key:
+        return None
+    return (CONFIG.get("model_tickets") or {}).get(key)
 
 
 def resolve_model(model_name: str, default: str = "gemini-3.6-flash"):
@@ -64,5 +83,7 @@ def resolve_model(model_name: str, default: str = "gemini-3.6-flash"):
         cfg = MODELS[default]
     mode_id = cfg["mode"]
     think_mode = think_override if think_override is not None else cfg["think"]
-    extra = cfg.get("extra")
-    return model_name, mode_id, think_mode, None, extra
+    extra = dict(cfg.get("extra") or {})
+    if "variant" in cfg and 80 not in extra:
+        extra[80] = cfg["variant"]
+    return model_name, mode_id, think_mode, None, extra or None

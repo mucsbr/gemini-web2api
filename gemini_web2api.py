@@ -64,6 +64,21 @@ DEFAULT_CONFIG = {
     "proxy": None,
     "api_keys": [],
     "temporary_chats": False,
+    # Per-model upstream tickets (X-Goog-Ext-525001261-Jspb). The browser mints
+    # one per model family and the server routes BY TICKET, ignoring the
+    # f.req [79]/[80] fields when it is absent (falls back to account default).
+    # Tickets carry embedded timestamps and expire; refresh by copying the
+    # header value from a fresh browser StreamGenerate request
+    # (DevTools -> Copy as cURL) into the matching key ("flash"/"pro"/...).
+    # The proxy logs a routing-mismatch warning when a ticket stops working.
+    "model_tickets": {
+        "flash": '[1,null,null,null,"fbb127bbb056c959",null,null,0,[4,5,6,8,4,5,6,8],null,null,1,null,null,1,1,"561701FD-A2E8-4275-98B0-636DFE1554F9",null,null,[[6,908199999],[1789884088,624000000]]]',
+        "pro": '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4,5,6,8,4,5,6,8],null,null,1,null,null,3,1,"32C786FF-9AE2-49E5-A67C-0A35421F63A6",null,null,[[6,620699999],[1789897904,515000000]]]',
+        "lite": '[1,null,null,null,"cf41b0e0dd7d53e5",null,null,0,[4,5,6,8,4,5,6,8],null,null,1,null,null,6,1,"32C786FF-9AE2-49E5-A67C-0A35421F63A6",null,null,[[null,95100000],[1789898801,131000000]]]',
+        "flash-thinking": '[1,null,null,null,"fbb127bbb056c959",null,null,0,[4,5,6,8,4,5,6,8],null,null,1,null,null,1,2,"279B5F21-C196-4B10-8EC7-31625C0CABE6",null,null,[[null,332100000],[1789899397,281000000]]]',
+        "lite-thinking": '[1,null,null,null,"cf41b0e0dd7d53e5",null,null,0,[4,5,6,8,4,5,6,8],null,null,1,null,null,6,2,"279B5F21-C196-4B10-8EC7-31625C0CABE6",null,null,[[2,950300000],[1789899759,320000000]]]',
+        "pro-thinking": '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4,5,6,8,4,5,6,8],null,null,1,null,null,3,2,"279B5F21-C196-4B10-8EC7-31625C0CABE6",null,null,[[null,85000000],[1789900208,389000000]]]',
+    },
 }
 
 CONFIG = dict(DEFAULT_CONFIG)
@@ -72,40 +87,52 @@ CONFIG = dict(DEFAULT_CONFIG)
 # Mapping from JS source: MODE_CATEGORY enum (028-6eb337387583.js)
 #   1=FAST, 2=THINKING, 3=PRO, 4=AUTO, 5=FAST_DYNAMIC_THINKING, 6=FLASH_LITE
 
+# Model selection uses TWO fields in the f.req inner array (decoded from live
+# browser captures, Sep 2026):
+#   inner[79] = family: 1=flash, 3=pro, 4=auto, 5=dynamic-thinking, 6=flash-lite
+#   inner[80] = variant: 1=standard, 2=extended/thinking
+# HOWEVER: the server only honors these fields when the request also carries
+# the per-model ticket header X-Goog-Ext-525001261-Jspb. Without the ticket
+# the server falls back to the account default regardless of [79]/[80].
+# The ticket wins over the body fields when both are present.
+
+TICKET_HEADER = "X-Goog-Ext-525001261-Jspb"
+
 MODELS = {
-    "gemini-3.7-flash": {
-        "mode": 1, "think": 4,
-        "desc": "Latest all-around model (Gemini 3.7 Flash)",
-    },
     "gemini-3.6-flash": {
-        "mode": 1, "think": 4,
+        "mode": 1, "think": 4, "variant": 1, "ticket": "flash",
         "desc": "All-around model (Gemini 3.6 Flash)",
     },
-    "gemini-3.5-flash": {
-        "mode": 1, "think": 4,
-        "desc": "Alias for gemini-3.6-flash (backend upgraded)",
+    "gemini-3.6-flash-thinking": {
+        "mode": 1, "think": 1, "variant": 2, "ticket": "flash-thinking",
+        "desc": "Extended thinking on Flash (~20k chars)",
     },
-    "gemini-3.5-flash-thinking": {
-        "mode": 2, "think": 0,
-        "desc": "Deep thinking mode, longest output (~20k chars)",
-    },
-    "gemini-3.1-pro": {
-        "mode": 3, "think": 4,
-        "desc": "Pro model (requires cookie for real routing)",
-    },
-    "gemini-auto": {
-        "mode": 4, "think": 4,
-        "desc": "Auto model selection",
+    "gemini-3.5-flash-lite": {
+        "mode": 6, "think": 4, "variant": 1, "ticket": "lite",
+        "desc": "Cost-efficient high-capacity model (Gemini 3.5 Flash-Lite)",
     },
     "gemini-3.5-flash-thinking-lite": {
-        "mode": 5, "think": 0,
-        "desc": "Dynamic thinking with adaptive depth",
+        "mode": 5, "think": 1, "variant": 2, "ticket": "lite-thinking",
+        "desc": "Extended thinking on Flash-Lite",
     },
-    "gemini-flash-lite": {
-        "mode": 6, "think": 4,
-        "desc": "Lightweight fast model",
+    "gemini-3.1-pro": {
+        "mode": 3, "think": 4, "variant": 1, "ticket": "pro",
+        "desc": "Pro model (requires cookie for real routing)",
+    },
+    "gemini-3.1-pro-thinking": {
+        "mode": 3, "think": 1, "variant": 2, "ticket": "pro-thinking",
+        "desc": "Extended thinking on Pro",
     },
 }
+
+
+def ticket_for(model_name: str):
+    """Return the upstream ticket header value for a model, or None."""
+    key = (MODELS.get(model_name) or {}).get("ticket")
+    if not key:
+        return None
+    return (CONFIG.get("model_tickets") or {}).get(key)
+
 
 # ─── Utilities ───────────────────────────────────────────────────────────────
 
@@ -200,6 +227,106 @@ def apply_chat_persistence_flags(inner: list) -> None:
         inner[41] = [2]
 
 
+def extract_auth_from_html(html: str) -> tuple:
+    """Extract (xsrf_token, gemini_bl) from Gemini app page HTML."""
+    xsrf = None
+    m = re.search(r'"SNlM0e"\s*:\s*"([^"]+)"', html)
+    if m:
+        raw = m.group(1)
+        try:
+            xsrf = raw.encode().decode("unicode_escape")
+        except Exception:
+            xsrf = raw
+        xsrf = xsrf.replace("\\u003d", "=").replace("\\u0026", "&")
+    bl = None
+    b = re.search(r"(boq_assistant-bard-web-server_\d+\.\d+_p\d+)", html)
+    if b:
+        bl = b.group(1)
+    return xsrf, bl
+
+
+def persist_auth_to_file(xsrf, bl) -> None:
+    """Write refreshed xsrf_token/gemini_bl back to the JSON cookie file."""
+    cookie_file = CONFIG.get("cookie_file")
+    if not cookie_file or not os.path.exists(cookie_file):
+        return
+    try:
+        with open(cookie_file, "r") as f:
+            content = f.read().strip()
+        if not content.startswith("{"):
+            return
+        data = json.loads(content)
+        if xsrf:
+            data["xsrf_token"] = xsrf
+        if bl:
+            data["gemini_bl"] = bl
+        with open(cookie_file, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+    except Exception as e:
+        log(f"Auth persist failed: {e}")
+
+
+def refresh_auth() -> bool:
+    """Refresh xsrf_token/gemini_bl from the authenticated Gemini page.
+
+    SNlM0e rotates every few minutes, so a statically exported token goes
+    stale and Gemini answers 400 with an xsrf error. Re-fetch it with the
+    cookie session and persist it back to the cookie file. Returns True if
+    a usable token was obtained.
+    """
+    cookie_str, sapisid = load_cookie()
+    if not cookie_str:
+        return False
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Cookie": cookie_str,
+        }
+        if sapisid:
+            headers["Authorization"] = make_sapisidhash(sapisid)
+        url = f"https://gemini.google.com{account_prefix()}/app"
+        ctx = ssl.create_default_context()
+        proxy = CONFIG.get("proxy")
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        if proxy:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy}),
+                urllib.request.HTTPSHandler(context=ctx))
+            resp = opener.open(req, timeout=30)
+        else:
+            resp = urllib.request.urlopen(req, context=ctx, timeout=30)
+        html = resp.read().decode("utf-8", errors="replace")
+        xsrf, bl = extract_auth_from_html(html)
+        if xsrf and xsrf != CONFIG.get("xsrf_token"):
+            CONFIG["xsrf_token"] = xsrf
+        if bl and bl != CONFIG.get("gemini_bl"):
+            CONFIG["gemini_bl"] = bl
+        if xsrf:
+            persist_auth_to_file(xsrf, bl)
+            log("Auth refreshed from Gemini page")
+            return True
+        log("Auth refresh found no token")
+        return False
+    except Exception as e:
+        log(f"Auth refresh failed: {e}")
+        return False
+
+
+def is_xsrf_error(e) -> bool:
+    """Check whether an upstream error is a 400 xsrf rejection."""
+    import urllib.error as _urlerr
+    if isinstance(e, _urlerr.HTTPError) and e.code == 400:
+        try:
+            return "xsrf" in e.read().decode("utf-8", errors="replace")
+        except Exception:
+            return True
+    resp = getattr(e, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) == 400:
+        return True
+    return False
+
+
 def fetch_latest_bl() -> Optional[str]:
     """Fetch the latest gemini_bl (and xsrf token when cookies are set) from gemini.google.com page."""
     try:
@@ -218,12 +345,11 @@ def fetch_latest_bl() -> Optional[str]:
         else:
             resp = urllib.request.urlopen(req, context=ctx, timeout=15)
         html = resp.read().decode("utf-8", errors="replace")
-        m = re.search(r'"SNlM0e":"([^"]+)"', html)
-        if m:
-            CONFIG["xsrf_token"] = m.group(1)
-        m = re.search(r'(boq_assistant-bard-web-server_\d+\.\d+_p\d+)', html)
-        if m:
-            return m.group(1)
+        xsrf, bl = extract_auth_from_html(html)
+        if xsrf and xsrf != CONFIG.get("xsrf_token"):
+            CONFIG["xsrf_token"] = xsrf
+        if bl:
+            return bl
     except Exception as e:
         log(f"BL auto-update fetch failed: {e}")
     return None
@@ -268,9 +394,9 @@ def upload_images(images: list) -> list:
 
 # ─── Gemini Protocol ─────────────────────────────────────────────────────────
 
-def gemini_stream_generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None) -> str:
+def gemini_stream_generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None, ticket: str = None) -> str:
     """Send prompt to Gemini StreamGenerate with retry."""
-    inner = [None] * 80
+    inner = [None] * 102
     if file_refs:
         refs = [[None, None, ref] for ref in file_refs]
         inner[0] = [prompt, 0, None, refs, None, None, 0]
@@ -292,6 +418,10 @@ def gemini_stream_generate(prompt: str, model_id: int, think_mode: int, file_ref
     inner[61] = []
     inner[68] = 1
     inner[79] = model_id
+    if extra_fields:
+        for k, v in extra_fields.items():
+            inner[k] = v
+    log(f"Upstream model family={model_id} variant={(extra_fields or {}).get(80)}")
 
     outer = [None, json.dumps(inner)]
     params = {"f.req": json.dumps(outer)}
@@ -309,11 +439,15 @@ def gemini_stream_generate(prompt: str, model_id: int, think_mode: int, file_ref
     if prefix:
         headers["X-Goog-AuthUser"] = str(CONFIG["auth_user"])
 
+    if load_cookie()[0] and not CONFIG.get("xsrf_token"):
+        refresh_auth()
     cookie_str, sapisid = load_cookie()
     if cookie_str:
         headers["Cookie"] = cookie_str
     if sapisid:
         headers["Authorization"] = make_sapisidhash(sapisid)
+    if ticket:
+        headers[TICKET_HEADER] = ticket
 
     def build_url() -> str:
         return (
@@ -336,7 +470,9 @@ def gemini_stream_generate(prompt: str, model_id: int, think_mode: int, file_ref
                 resp = opener.open(req, timeout=CONFIG["request_timeout_sec"])
             else:
                 resp = urllib.request.urlopen(req, context=ctx, timeout=CONFIG["request_timeout_sec"])
-            return resp.read().decode("utf-8", errors="replace")
+            raw = resp.read().decode("utf-8", errors="replace")
+            check_routing(raw, model_id, extra_fields, ticket)
+            return raw
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 raise RuntimeError("Gemini upstream rate-limited this IP (HTTP 429); retrying immediately would extend the block")
@@ -356,9 +492,9 @@ def gemini_stream_generate(prompt: str, model_id: int, think_mode: int, file_ref
     raise last_err
 
 
-def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, file_refs: list = None):
+def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None, ticket: str = None):
     """Send prompt and yield incremental text deltas using httpx streaming."""
-    inner = [None] * 80
+    inner = [None] * 102
     if file_refs:
         refs = [[None, None, ref] for ref in file_refs]
         inner[0] = [prompt, 0, None, refs, None, None, 0]
@@ -380,6 +516,10 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
     inner[61] = []
     inner[68] = 1
     inner[79] = model_id
+    if extra_fields:
+        for k, v in extra_fields.items():
+            inner[k] = v
+    log(f"Upstream model family={model_id} variant={(extra_fields or {}).get(80)}")
 
     outer = [None, json.dumps(inner)]
     params = {"f.req": json.dumps(outer)}
@@ -401,11 +541,15 @@ def gemini_stream_generate_iter(prompt: str, model_id: int, think_mode: int, fil
     }
     if prefix:
         headers["X-Goog-AuthUser"] = str(CONFIG["auth_user"])
+    if load_cookie()[0] and not CONFIG.get("xsrf_token"):
+        refresh_auth()
     cookie_str, sapisid = load_cookie()
     if cookie_str:
         headers["Cookie"] = cookie_str
     if sapisid:
         headers["Authorization"] = make_sapisidhash(sapisid)
+    if ticket:
+        headers[TICKET_HEADER] = ticket
 
     proxy = CONFIG.get("proxy")
 
@@ -584,6 +728,50 @@ def extract_response_text(raw: str) -> str:
     return clean_gemini_text(main_best or any_best)
 
 
+def upstream_echo(raw: str):
+    """Return (label, family, variant) echoed by upstream, or None.
+
+    The StreamGenerate response echoes the model that actually served the
+    request; comparing it against the requested family/variant detects
+    ignored model selection (e.g. expired model ticket).
+    """
+    for line in raw.split("\n"):
+        if '"wrb.fr"' not in line or len(line) < 200:
+            continue
+        try:
+            meta = json.loads(json.loads(line)[0][2])
+        except (json.JSONDecodeError, IndexError, TypeError):
+            continue
+        if isinstance(meta, list) and len(meta) >= 60:
+            return meta[42], meta[58], meta[59]
+    return None
+
+
+def check_routing(raw: str, model_id: int, extra_fields: dict = None, ticket: str = None) -> None:
+    """Log a warning when upstream served a different model than requested.
+
+    When a ticket is used it wins over the body fields, so expectations are
+    read from the ticket's embedded (family, variant).
+    """
+    echo = upstream_echo(raw)
+    if not echo:
+        return
+    _, fam, var = echo
+    if ticket:
+        try:
+            t = json.loads(ticket)
+            want_fam, want_var = t[14], t[15]
+        except (json.JSONDecodeError, IndexError, TypeError):
+            want_fam, want_var = model_id, (extra_fields or {}).get(80)
+    else:
+        want_fam, want_var = model_id, (extra_fields or {}).get(80)
+    if fam != want_fam or (want_var is not None and var != want_var):
+        log(f"Routing mismatch: requested family={want_fam} variant={want_var} "
+            f"but upstream served {echo[0]!r} (family={fam} variant={var}); "
+            f"the model ticket in CONFIG['model_tickets'] may be expired — "
+            f"refresh it from a fresh browser capture")
+
+
 # ─── OpenAI Format Helpers ───────────────────────────────────────────────────
 
 PROMPT_MAX_BYTES = 60000
@@ -736,25 +924,133 @@ def google_contents_to_prompt(req: dict) -> tuple:
     return "\n\n".join(part for part in parts if part), images
 
 
-def parse_tool_calls(text: str) -> tuple:
-    """Extract tool_call blocks. Returns (clean_text, tool_calls_list)."""
-    tool_calls = []
-    pattern = r'```tool_call\s*\n(.*?)\n```'
-    for match in re.findall(pattern, text, re.DOTALL):
+def tool_names(tools: list) -> set:
+    """Extract declared function names from an OpenAI tools list."""
+    names = set()
+    for tool in tools or []:
+        fn = tool.get("function", tool) if tool.get("type") == "function" else tool
+        name = fn.get("name") if isinstance(fn, dict) else None
+        if name:
+            names.add(name)
+    return names
+
+
+def _safe_json_loads(raw: str):
+    try:
+        return json.loads(raw.strip())
+    except (json.JSONDecodeError, ValueError, AttributeError):
+        return None
+
+
+def _coerce_tool_data(data):
+    """Validate a parsed candidate as {"name": ..., "arguments": {...}}."""
+    if not isinstance(data, dict):
+        return None
+    name = data.get("name")
+    if not name or not isinstance(name, str):
+        return None
+    args = data.get("arguments", data.get("args", {}))
+    if isinstance(args, str):
         try:
-            data = json.loads(match.strip())
-            tool_calls.append({
-                "id": f"call_{uuid.uuid4().hex[:8]}",
-                "type": "function",
-                "function": {
-                    "name": data["name"],
-                    "arguments": json.dumps(data.get("arguments", {}), ensure_ascii=False),
-                },
-            })
-        except (json.JSONDecodeError, KeyError):
-            pass
-    clean = re.sub(pattern, '', text, flags=re.DOTALL).strip()
-    return clean, tool_calls
+            args = json.loads(args)
+        except (json.JSONDecodeError, ValueError):
+            args = {}
+    if not isinstance(args, dict):
+        args = {}
+    return {"name": name, "arguments": args}
+
+
+def _parse_bracket_args(raw: str):
+    """Parse bracket-shorthand args, tolerating a trailing extra brace."""
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    if raw.rstrip().endswith("}"):
+        try:
+            return json.loads(raw.rstrip()[:-1])
+        except (json.JSONDecodeError, ValueError):
+            return None
+    return None
+
+
+def parse_tool_calls(text: str, valid_names: set = None) -> tuple:
+    """Extract tool_call blocks. Returns (clean_text, tool_calls_list).
+
+    Accepts the formats models emit in practice:
+    1. ```tool_call\\n{"name": ..., "arguments": {...}}\\n``` (canonical)
+    2. ```function_call\\n{...}\\n``` (common variant)
+    3. ```json\\n{"name": ..., "arguments": {...}}\\n``` (bare JSON fence)
+    4. [tool_call: name {...}] (bracket shorthand)
+    5. Raw {"name": ..., "arguments"/"args": {...}} object
+
+    Fences that do not parse as a tool call (e.g. a legit ```json code
+    sample) are left untouched. When valid_names is given, calls to
+    undeclared tools are dropped so clients don't choke on hallucinated
+    tool names.
+    """
+    spans = []  # (start, end, {"name":..., "arguments":...})
+
+    def _collect(pattern, group=1):
+        for m in re.finditer(pattern, text, re.DOTALL):
+            data = _coerce_tool_data(_safe_json_loads(m.group(group)))
+            if data:
+                spans.append((m.start(), m.end(), data))
+
+    _collect(r'```tool_call\s*\n(.*?)\n```')
+    _collect(r'```function_call\s*\n(.*?)\n```')
+    _collect(r'```json\s*\n(.*?)\n```')
+
+    for m in re.finditer(r'\[tool_call\s*:\s*([A-Za-z0-9_.\-]+)\s*(\{.*\})\s*\]',
+                         text, re.DOTALL):
+        args = _parse_bracket_args(m.group(2).strip())
+        if args is not None:
+            data = _coerce_tool_data({"name": m.group(1), "arguments": args})
+            if data:
+                spans.append((m.start(), m.end(), data))
+
+    spans.sort()
+    # Drop overlapping spans (keep the earliest match).
+    merged = []
+    for span in spans:
+        if merged and span[0] < merged[-1][1]:
+            continue
+        merged.append(span)
+
+    clean_parts = []
+    last_end = 0
+    tool_calls = []
+    for start, end, data in merged:
+        clean_parts.append(text[last_end:start])
+        last_end = end
+        if valid_names is not None and data["name"] not in valid_names:
+            continue
+        tool_calls.append({
+            "id": f"call_{uuid.uuid4().hex[:8]}",
+            "type": "function",
+            "function": {
+                "name": data["name"],
+                "arguments": json.dumps(data["arguments"], ensure_ascii=False),
+            },
+        })
+    clean_parts.append(text[last_end:])
+
+    if not tool_calls:
+        stripped = text.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            data = _coerce_tool_data(_safe_json_loads(stripped))
+            if data and (valid_names is None or data["name"] in valid_names):
+                tool_calls.append({
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                    "type": "function",
+                    "function": {
+                        "name": data["name"],
+                        "arguments": json.dumps(data["arguments"], ensure_ascii=False),
+                    },
+                })
+                return "", tool_calls
+
+    return "".join(clean_parts).strip(), tool_calls
 
 
 # ─── HTTP Handler ────────────────────────────────────────────────────────────
@@ -880,24 +1176,54 @@ class GeminiHandler(BaseHTTPRequestHandler):
             think_override = int(think_str)
         cfg = MODELS.get(model_name)
         if not cfg:
-            return None, None, None, f"Unknown model: {model_name}"
-        return model_name, cfg["mode"], (think_override if think_override is not None else cfg["think"]), None
+            return None, None, None, f"Unknown model: {model_name}", None
+        extra = dict(cfg.get("extra") or {})
+        if "variant" in cfg and 80 not in extra:
+            extra[80] = cfg["variant"]
+        return model_name, cfg["mode"], (think_override if think_override is not None else cfg["think"]), None, extra or None
 
-    def _call_gemini(self, prompt, model_id, think_mode, tools, file_refs=None):
-        raw = gemini_stream_generate(prompt, model_id, think_mode, file_refs)
+    def _call_gemini(self, prompt, model_id, think_mode, tools, file_refs=None, extra_fields=None, ticket=None):
+        raw = gemini_stream_generate(prompt, model_id, think_mode, file_refs, extra_fields, ticket)
         text = extract_response_text(raw)
         tool_calls = None
         if tools and text:
-            text, tool_calls = parse_tool_calls(text)
+            text, tool_calls = parse_tool_calls(text, tool_names(tools))
         return text or "", tool_calls
+
+    def stream_tool_calls(self, cid, model_name, tool_calls, arg_slice=120):
+        """Emit tool calls as OpenAI-spec streaming deltas with `index`."""
+        def chunk(delta, finish_reason=None):
+            return {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
+                    "model": model_name,
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(f"data: {json.dumps(chunk({'role': 'assistant'}), ensure_ascii=False)}\n\n".encode())
+        for i, tc in enumerate(tool_calls):
+            fn = tc.get("function", {})
+            head = {"role": "assistant",
+                    "tool_calls": [{"index": i, "id": tc.get("id"), "type": "function",
+                                    "function": {"name": fn.get("name", ""), "arguments": ""}}]}
+            self.wfile.write(f"data: {json.dumps(chunk(head), ensure_ascii=False)}\n\n".encode())
+            args = fn.get("arguments", "") or ""
+            for j in range(0, len(args), arg_slice):
+                piece = {"tool_calls": [{"index": i, "function": {"arguments": args[j:j + arg_slice]}}]}
+                self.wfile.write(f"data: {json.dumps(chunk(piece), ensure_ascii=False)}\n\n".encode())
+        self.wfile.write(f"data: {json.dumps(chunk({}, 'tool_calls'))}\n\n".encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
 
     def handle_chat(self, body: bytes):
         req = json.loads(body)
-        model_name, model_id, think_mode, err = self._resolve_model(
+        model_name, model_id, think_mode, err, extra_fields = self._resolve_model(
             req.get("model", CONFIG["default_model"]))
         if err:
             self.send_json({"error": {"message": err}}, 400)
             return
+        ticket = ticket_for(model_name)
 
         tools = req.get("tools")
         prompt, images = messages_to_prompt(req.get("messages", []), tools)
@@ -924,7 +1250,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 first_chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
                                "model": model_name, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}
                 self.wfile.write(f"data: {json.dumps(first_chunk)}\n\n".encode())
-                for delta_text in gemini_stream_generate_iter(prompt, model_id, think_mode, file_refs):
+                for delta_text in gemini_stream_generate_iter(prompt, model_id, think_mode, file_refs, extra_fields, ticket):
                     chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
                              "model": model_name, "choices": [{"index": 0, "delta": {"content": delta_text}, "finish_reason": None}]}
                     self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())
@@ -952,7 +1278,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
         # Non-streaming (or tool calling which needs full response)
         try:
-            text, tool_calls = self._call_gemini(prompt, model_id, think_mode, tools, file_refs)
+            text, tool_calls = self._call_gemini(prompt, model_id, think_mode, tools, file_refs, extra_fields, ticket)
         except Exception as e:
             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
             return
@@ -963,17 +1289,21 @@ class GeminiHandler(BaseHTTPRequestHandler):
         finish = "tool_calls" if tool_calls else "stop"
 
         if stream:
-            # Stream mode with tools: send as single chunk (need full parse for tool_calls)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
-                     "model": model_name, "choices": [{"index": 0, "delta": msg, "finish_reason": finish}]}
-            self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
+            if tool_calls:
+                # Stream mode with tools: OpenAI-spec deltas with `index`
+                self.stream_tool_calls(cid, model_name, tool_calls)
+            else:
+                # Stream mode with tools: send as single chunk (need full parse for tool_calls)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
+                         "model": model_name, "choices": [{"index": 0, "delta": msg, "finish_reason": finish}]}
+                self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
         else:
             self.send_json({
                 "id": cid, "object": "chat.completion", "created": int(time.time()),
@@ -986,11 +1316,12 @@ class GeminiHandler(BaseHTTPRequestHandler):
     def handle_responses(self, body: bytes):
         """OpenAI Responses API for Codex CLI compatibility."""
         req = json.loads(body)
-        model_name, model_id, think_mode, err = self._resolve_model(
+        model_name, model_id, think_mode, err, extra_fields = self._resolve_model(
             req.get("model", CONFIG["default_model"]))
         if err:
             self.send_json({"error": {"message": err}}, 400)
             return
+        ticket = ticket_for(model_name)
 
         input_items = req.get("input", [])
         tools = req.get("tools")
@@ -1041,7 +1372,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
         try:
             file_refs = upload_images(images)
-            text, tool_calls = self._call_gemini(prompt, model_id, think_mode, tools, file_refs)
+            text, tool_calls = self._call_gemini(prompt, model_id, think_mode, tools, file_refs, extra_fields, ticket)
         except Exception as e:
             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
             return
@@ -1129,10 +1460,11 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self.send_json({"error": {"message": "model not specified in path"}}, 400)
             return
 
-        model_name, model_id, think_mode, err = self._resolve_model(model_name)
+        model_name, model_id, think_mode, err, extra_fields = self._resolve_model(model_name)
         if err:
             self.send_json({"error": {"message": err}}, 400)
             return
+        ticket = ticket_for(model_name)
 
         prompt, images = google_contents_to_prompt(req)
         if not prompt.strip():
@@ -1141,7 +1473,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
         try:
             file_refs = upload_images(images)
-            text, _ = self._call_gemini(prompt, model_id, think_mode, None, file_refs)
+            text, _ = self._call_gemini(prompt, model_id, think_mode, None, file_refs, extra_fields, ticket)
         except Exception as e:
             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
             return

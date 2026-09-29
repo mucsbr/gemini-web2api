@@ -116,6 +116,48 @@ def load_cookie() -> tuple:
         return _cookie_cache["str"], _cookie_cache["sapisid"]
 
 
+def _extract_auth_from_html(html: str) -> tuple:
+    """Extract (xsrf_token, gemini_bl) from Gemini app page HTML."""
+    xsrf = None
+    m = re.search(r'"SNlM0e"\s*:\s*"([^"]+)"', html)
+    if m:
+        raw = m.group(1)
+        try:
+            xsrf = raw.encode().decode("unicode_escape")
+        except Exception:
+            xsrf = raw
+        xsrf = xsrf.replace("\\u003d", "=").replace("\\u0026", "&")
+    bl = None
+    b = re.search(r"(boq_assistant-bard-web-server_\d+\.\d+_p\d+)", html)
+    if b:
+        bl = b.group(1)
+    return xsrf, bl
+
+
+def _persist_auth_to_file(xsrf, bl) -> None:
+    """Write refreshed xsrf_token/gemini_bl back to the JSON cookie file."""
+    cookie_file = CONFIG.get("cookie_file")
+    if not cookie_file or not os.path.exists(cookie_file):
+        return
+    try:
+        with open(cookie_file, "r") as f:
+            content = f.read().strip()
+        if not content.startswith("{"):
+            return
+        data = json.loads(content)
+        if xsrf:
+            data["xsrf_token"] = xsrf
+        if bl:
+            data["gemini_bl"] = bl
+        with open(cookie_file, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        _cookie_cache["mtime"] = 0
+        _cookie_cache["size"] = -1
+    except Exception as e:
+        log(f"Auth persist failed: {e}")
+
+
 def refresh_bl_and_xsrf() -> bool:
     """Fetch the app page with cookies; refresh gemini_bl and xsrf_token (SNlM0e).
     Returns True if either value changed."""
@@ -137,18 +179,78 @@ def refresh_bl_and_xsrf() -> bool:
         else:
             resp = urllib.request.urlopen(req, context=ctx, timeout=15)
         html = resp.read().decode("utf-8", errors="replace")
-        m = re.search(r'"SNlM0e":"([^"]+)"', html)
-        if m:
-            CONFIG["xsrf_token"] = m.group(1)
-        m = re.search(r'(boq_assistant-bard-web-server_\d+\.\d+_p\d+)', html)
-        if m:
-            CONFIG["gemini_bl"] = m.group(1)
+        xsrf, bl = _extract_auth_from_html(html)
+        if xsrf and xsrf != CONFIG.get("xsrf_token"):
+            CONFIG["xsrf_token"] = xsrf
+        if bl and bl != CONFIG.get("gemini_bl"):
+            CONFIG["gemini_bl"] = bl
     except Exception as e:
         log(f"BL/XSRF refresh failed: {e}")
     changed = CONFIG["gemini_bl"] != old_bl or CONFIG.get("xsrf_token") != old_xsrf
     if changed:
         log(f"BL/XSRF refreshed: xsrf {'new' if CONFIG.get('xsrf_token') != old_xsrf else 'unchanged'}, bl {old_bl} -> {CONFIG['gemini_bl']}")
     return changed
+
+
+def refresh_auth() -> bool:
+    """Refresh xsrf_token/gemini_bl from the authenticated Gemini page.
+
+    SNlM0e rotates every few minutes, so a statically exported token goes
+    stale and Gemini answers 400 with an xsrf error. Re-fetch it with the
+    cookie session and persist it back to the cookie file. Returns True if
+    a usable token was obtained.
+    """
+    cookie_str, sapisid = load_cookie()
+    if not cookie_str:
+        return False
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Cookie": cookie_str,
+        }
+        if sapisid:
+            headers["Authorization"] = make_sapisidhash(sapisid)
+        url = f"https://gemini.google.com{_account_prefix()}/app"
+        ctx = _get_ssl_ctx()
+        proxy = CONFIG.get("proxy")
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        if proxy:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy}),
+                urllib.request.HTTPSHandler(context=ctx)
+            )
+            resp = opener.open(req, timeout=30)
+        else:
+            resp = urllib.request.urlopen(req, context=ctx, timeout=30)
+        html = resp.read().decode("utf-8", errors="replace")
+        xsrf, bl = _extract_auth_from_html(html)
+        if xsrf and xsrf != CONFIG.get("xsrf_token"):
+            CONFIG["xsrf_token"] = xsrf
+        if bl and bl != CONFIG.get("gemini_bl"):
+            CONFIG["gemini_bl"] = bl
+        if xsrf:
+            _persist_auth_to_file(xsrf, bl)
+            log("Auth refreshed from Gemini page")
+            return True
+        log("Auth refresh found no token")
+        return False
+    except Exception as e:
+        log(f"Auth refresh failed: {e}")
+        return False
+
+
+def _is_xsrf_error(e: Exception) -> bool:
+    """Check whether an upstream error is a 400 xsrf rejection."""
+    import urllib.error as _urlerr
+    if isinstance(e, _urlerr.HTTPError) and e.code == 400:
+        try:
+            return "xsrf" in e.read().decode("utf-8", errors="replace")
+        except Exception:
+            return True
+    resp = getattr(e, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) == 400:
+        return True
+    return False
 
 
 def make_sapisidhash(sapisid: str) -> str:
@@ -165,7 +267,7 @@ def _account_prefix() -> str:
     return f"/u/{auth_user}"
 
 
-def _build_headers() -> dict:
+def _build_headers(ticket: str = None) -> dict:
     account_prefix = _account_prefix()
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -181,6 +283,9 @@ def _build_headers() -> dict:
         headers["Cookie"] = cookie_str
     if sapisid:
         headers["Authorization"] = make_sapisidhash(sapisid)
+    if ticket:
+        from .models import TICKET_HEADER
+        headers[TICKET_HEADER] = ticket
     return headers
 
 
@@ -220,6 +325,7 @@ def _build_payload(prompt: str, model_id: int, think_mode: int, file_refs: list 
     if extra_fields:
         for k, v in extra_fields.items():
             inner[k] = v
+    log(f"Upstream model family={model_id} variant={(extra_fields or {}).get(80)}")
     outer = [None, json.dumps(inner)]
     params = {"f.req": json.dumps(outer)}
     if CONFIG.get("xsrf_token"):
@@ -354,8 +460,54 @@ def extract_response_text(raw: str) -> str:
     return clean_text(main_best or any_best)
 
 
-def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None) -> str:
+def upstream_echo(raw: str):
+    """Return (label, family, variant) echoed by upstream, or None.
+
+    The StreamGenerate response echoes the model that actually served the
+    request; comparing it against the requested family/variant detects
+    ignored model selection (e.g. expired model ticket).
+    """
+    for line in raw.split("\n"):
+        if '"wrb.fr"' not in line or len(line) < 200:
+            continue
+        try:
+            meta = json.loads(json.loads(line)[0][2])
+        except (json.JSONDecodeError, IndexError, TypeError):
+            continue
+        if isinstance(meta, list) and len(meta) >= 60:
+            return meta[42], meta[58], meta[59]
+    return None
+
+
+def check_routing(raw: str, model_id: int, extra_fields: dict = None, ticket: str = None) -> None:
+    """Log a warning when upstream served a different model than requested.
+
+    When a ticket is used it wins over the body fields, so expectations are
+    read from the ticket's embedded (family, variant).
+    """
+    echo = upstream_echo(raw)
+    if not echo:
+        return
+    _, fam, var = echo
+    if ticket:
+        try:
+            t = json.loads(ticket)
+            want_fam, want_var = t[14], t[15]
+        except (json.JSONDecodeError, IndexError, TypeError):
+            want_fam, want_var = model_id, (extra_fields or {}).get(80)
+    else:
+        want_fam, want_var = model_id, (extra_fields or {}).get(80)
+    if fam != want_fam or (want_var is not None and var != want_var):
+        log(f"Routing mismatch: requested family={want_fam} variant={want_var} "
+            f"but upstream served {echo[0]!r} (family={fam} variant={var}); "
+            f"the model ticket in CONFIG['model_tickets'] may be expired — "
+            f"refresh it from a fresh browser capture")
+
+
+def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None, ticket: str = None) -> str:
     """Non-streaming generation with retry."""
+    if load_cookie()[0] and not CONFIG.get("xsrf_token"):
+        refresh_auth()
     ctx = _get_ssl_ctx()
     proxy = CONFIG.get("proxy")
 
@@ -364,7 +516,7 @@ def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None
         try:
             # Rebuilt per attempt so a BL/XSRF refresh takes effect on retry.
             body = _build_payload(prompt, model_id, think_mode, file_refs, extra_fields).encode()
-            headers = _build_headers()
+            headers = _build_headers(ticket)
             req = urllib.request.Request(_get_url(), data=body, headers=headers, method="POST")
             if proxy:
                 opener = urllib.request.build_opener(
@@ -375,6 +527,7 @@ def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None
             else:
                 resp = urllib.request.urlopen(req, context=ctx, timeout=CONFIG["request_timeout_sec"])
             raw = resp.read().decode("utf-8", errors="replace")
+            check_routing(raw, model_id, extra_fields, ticket)
             return extract_response_text(raw)
         except urllib.error.HTTPError as e:
             if e.code == 429:
@@ -395,7 +548,7 @@ def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None
     raise last_err
 
 
-def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None):
+def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None, ticket: str = None):
     """Streaming generation via httpx with retry on connection failure.
 
     Only the primary candidate of the main answer frame is streamed.
@@ -405,11 +558,13 @@ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list
     splicing unrelated frames into the output.
     """
     if not HAS_HTTPX:
-        text = generate(prompt, model_id, think_mode, file_refs, extra_fields)
+        text = generate(prompt, model_id, think_mode, file_refs, extra_fields, ticket)
         if text:
             yield text
         return
 
+    if load_cookie()[0] and not CONFIG.get("xsrf_token"):
+        refresh_auth()
     client = _get_httpx_client()
 
     last_err = None
@@ -420,7 +575,7 @@ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list
         try:
             # Rebuilt per attempt so a BL/XSRF refresh takes effect on retry.
             body = _build_payload(prompt, model_id, think_mode, file_refs, extra_fields)
-            headers = _build_headers()
+            headers = _build_headers(ticket)
             with client.stream("POST", _get_url(), content=body, headers=headers) as resp:
                 resp.raise_for_status()
                 buf = ""

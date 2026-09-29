@@ -7,7 +7,8 @@ from unittest import mock
 from urllib.parse import parse_qs
 
 from gemini_web2api.config import CONFIG, DEFAULT_CONFIG
-from gemini_web2api.gemini import _build_payload
+from gemini_web2api.gemini import _build_headers, _build_payload, upstream_echo
+from gemini_web2api.models import TICKET_HEADER, resolve_model, ticket_for
 from gemini_web2api.server import GeminiHandler, ThreadedServer
 from gemini_web2api.tools import google_contents_to_prompt, messages_to_prompt
 
@@ -66,6 +67,80 @@ class PayloadPersistenceTests(unittest.TestCase):
 
         self.assertEqual(inner[0][0], "describe")
         self.assertEqual(inner[0][3], [[None, None, "/uploaded/image-ref"]])
+
+
+class ModelRoutingTests(unittest.TestCase):
+    # Model selection = inner[79] (family) + inner[80] (variant), decoded
+    # from live browser StreamGenerate captures (Sep 2026). Regression test:
+    # omitting inner[80] made the server fall back to 3.1 Pro for every model.
+    def test_browser_captured_family_variant_pairs(self):
+        cases = {
+            "gemini-3.6-flash": (1, 1),
+            "gemini-3.1-pro": (3, 1),
+            "gemini-3.1-pro-thinking": (3, 2),
+            "gemini-3.6-flash-thinking": (1, 2),
+            "gemini-3.5-flash-lite": (6, 1),
+            "gemini-3.5-flash-thinking-lite": (5, 2),
+        }
+        for name, (family, variant) in cases.items():
+            with self.subTest(model=name):
+                _, mode, _, err, extra = resolve_model(name)
+                self.assertIsNone(err)
+                inner = _decode_payload(_build_payload("hi", mode, 4, extra_fields=extra))
+                self.assertEqual(inner[79], family)
+                self.assertEqual(inner[80], variant)
+
+
+class ModelTicketTests(unittest.TestCase):
+    # The server routes BY the X-Goog-Ext-525001261-Jspb ticket and ignores
+    # f.req [79]/[80] without it. Verified live: (3,1)+pro-ticket -> Pro,
+    # (1,1)+flash-ticket -> Flash, (3,1)+flash-ticket -> Flash (ticket wins).
+    def test_ticket_mapping(self):
+        self.assertEqual(
+            ticket_for("gemini-3.6-flash"), CONFIG["model_tickets"]["flash"])
+        self.assertEqual(
+            ticket_for("gemini-3.1-pro"), CONFIG["model_tickets"]["pro"])
+        self.assertEqual(
+            ticket_for("gemini-3.5-flash-lite"), CONFIG["model_tickets"]["lite"])
+        self.assertEqual(
+            ticket_for("gemini-3.6-flash-thinking"), CONFIG["model_tickets"]["flash-thinking"])
+        self.assertEqual(
+            ticket_for("gemini-3.5-flash-thinking-lite"), CONFIG["model_tickets"]["lite-thinking"])
+        self.assertEqual(
+            ticket_for("gemini-3.1-pro-thinking"), CONFIG["model_tickets"]["pro-thinking"])
+        self.assertIsNone(ticket_for("gemini-auto"))
+        self.assertIsNone(ticket_for("gemini-nope"))
+
+    def test_ticket_embeds_family_variant(self):
+        import json as _json
+        flash = _json.loads(CONFIG["model_tickets"]["flash"])
+        pro = _json.loads(CONFIG["model_tickets"]["pro"])
+        lite = _json.loads(CONFIG["model_tickets"]["lite"])
+        think = _json.loads(CONFIG["model_tickets"]["flash-thinking"])
+        litethink = _json.loads(CONFIG["model_tickets"]["lite-thinking"])
+        prothink = _json.loads(CONFIG["model_tickets"]["pro-thinking"])
+        self.assertEqual((flash[14], flash[15]), (1, 1))
+        self.assertEqual((pro[14], pro[15]), (3, 1))
+        self.assertEqual((lite[14], lite[15]), (6, 1))
+        self.assertEqual((think[14], think[15]), (1, 2))
+        self.assertEqual((litethink[14], litethink[15]), (6, 2))
+        self.assertEqual((prothink[14], prothink[15]), (3, 2))
+
+    def test_ticket_header_sent(self):
+        headers = _build_headers(ticket="TICKET-VALUE")
+        self.assertEqual(headers[TICKET_HEADER], "TICKET-VALUE")
+        headers = _build_headers()
+        self.assertNotIn(TICKET_HEADER, headers)
+
+    def test_upstream_echo_parsing(self):
+        import json as _json
+        meta = [None] * 60
+        meta[42] = "3.6 Flash"
+        meta[58] = 1
+        meta[59] = 1
+        raw = _json.dumps([["wrb.fr", None, _json.dumps(meta)]]) + "\n" + "x" * 200
+        self.assertEqual(upstream_echo(raw), ("3.6 Flash", 1, 1))
+        self.assertIsNone(upstream_echo("garbage"))
 
 
 class MessageParsingTests(unittest.TestCase):

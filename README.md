@@ -4,7 +4,7 @@
   <img src="logo.png" width="200" alt="gemini-web2api logo">
 </p>
 
-[中文文档](README_CN.md)
+[中文](README_CN.md)
 
 Convert Google Gemini's web interface into an OpenAI-compatible API. Zero cost, cross-platform, single file.
 
@@ -13,7 +13,7 @@ Convert Google Gemini's web interface into an OpenAI-compatible API. Zero cost, 
 - **Optional API Keys**: no auth when `api_keys` is empty, OpenAI-style Bearer auth when configured
 - **OpenAI Compatible**: Drop-in replacement for `/v1/chat/completions` and `/v1/models`
 - **Tool Calling**: Full function calling support (OpenAI format)
-- **Multiple Models**: Flash (3.6), Extended Thinking (20k+ char output), Pro, Auto, Lite
+- **Multiple Models**: Flash (3.6), Extended Thinking (20k+ char output), Pro, Lite
 - **Thinking Depth**: Adjustable via `@think=N` suffix (0=deepest, 4=shallowest)
 - **Web Search**: Built-in internet access (Gemini's native search)
 - **Cross-Platform**: Pure Python, single optional dependency (`httpx` for streaming)
@@ -38,7 +38,7 @@ Server starts at `http://localhost:8081/v1`.
 |-------|-------|
 | Base URL | `http://localhost:8081/v1` |
 | API Key | any `api_keys` value from `config.json`; anything if not configured |
-| Model | `gemini-3.5-flash-thinking` |
+| Model | `gemini-3.6-flash-thinking` |
 
 ### curl
 
@@ -48,13 +48,13 @@ Server starts at `http://localhost:8081/v1`.
 curl http://localhost:8081/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-your-key" \
-  -d '{"model":"gemini-3.5-flash","messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{"model":"gemini-3.6-flash","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
 #### PowerShell (Windows)
 
 ```powershell
-curl.exe --% http://127.0.0.1:8081/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer sk-your-key" -d "{\"model\":\"gemini-3.5-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}]}"
+curl.exe --% http://127.0.0.1:8081/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer sk-your-key" -d "{\"model\":\"gemini-3.6-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}]}"
 ```
 
 > Note: On Windows PowerShell, use `curl.exe` and `--%` so PowerShell does not reinterpret JSON quoting or curl options.
@@ -65,7 +65,7 @@ curl.exe --% http://127.0.0.1:8081/v1/chat/completions -H "Content-Type: applica
 from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8081/v1", api_key="sk-your-key")
 resp = client.chat.completions.create(
-    model="gemini-3.5-flash-thinking",
+    model="gemini-3.6-flash-thinking",
     messages=[{"role": "user", "content": "Explain quantum computing"}]
 )
 print(resp.choices[0].message.content)
@@ -80,33 +80,29 @@ gemini
 ```
 
 Supports Google native API endpoints:
-- `GET /v1beta/models` — list models
-- `POST /v1beta/models/{model}:generateContent` — non-streaming
-- `POST /v1beta/models/{model}:streamGenerateContent` — streaming (SSE)
+- `GET /v1beta/models` - list models
+- `POST /v1beta/models/{model}:generateContent` - non-streaming
+- `POST /v1beta/models/{model}:streamGenerateContent` - streaming (SSE)
 
 ## Available Models
 
 | Model | Description | Output |
 |-------|-------------|--------|
-| `gemini-3.8-flash` | All-around model (latest) | ~12k chars |
-| `gemini-3.7-flash` | All-around model | ~12k chars |
-| `gemini-3.6-flash` | All-around model | ~12k chars |
-| `gemini-3.5-flash` | Alias for gemini-3.6-flash | ~12k chars |
-| `gemini-3.5-flash-thinking` | Extended thinking, longest output | **~20k chars** |
-| `gemini-3.5-flash-thinking-lite` | Adaptive thinking depth | ~15k chars |
+| `gemini-3.6-flash` | All-around model (web UI Flash) | ~12k chars |
+| `gemini-3.6-flash-thinking` | Extended thinking on Flash | **~20k chars** |
+| `gemini-3.5-flash-lite` | Cost-efficient, high capacity | ~10k chars |
+| `gemini-3.5-flash-thinking-lite` | Extended thinking on Flash-Lite | ~15k chars |
 | `gemini-3.1-pro` | Advanced math & code (needs cookie) | ~12k chars |
-| `gemini-3.1-pro-enhanced` | Pro with enhanced output (experimental) | varies |
-| `gemini-auto` | Auto model selection | varies |
-| `gemini-flash-lite` | Fastest answers, lightweight | ~10k chars |
+| `gemini-3.1-pro-thinking` | Extended thinking on Pro | **~20k chars** |
 
 ### Thinking Depth
 
 Append `@think=N` to any model name:
 
 ```
-gemini-3.5-flash-thinking@think=0   # deepest (default)
-gemini-3.5-flash-thinking@think=2   # medium
-gemini-3.5-flash-thinking@think=4   # shallowest
+gemini-3.6-flash-thinking@think=0   # deepest
+gemini-3.6-flash-thinking@think=1   # browser default
+gemini-3.6-flash-thinking@think=4   # shallowest
 ```
 
 ## Optional: Cookie for Pro
@@ -120,7 +116,7 @@ python gemini_web2api.py --cookie-file cookie.txt
 ### How to get cookies
 
 1. Open Chrome, go to [gemini.google.com](https://gemini.google.com) and sign in with a **Gemini Advanced** Google account
-2. Open DevTools (F12) → Application → Cookies → `https://gemini.google.com`
+2. Open DevTools (F12) -> Application -> Cookies -> `https://gemini.google.com`
 3. Copy these cookie values: `SID`, `HSID`, `SSID`, `APISID`, `SAPISID`, `__Secure-1PSID`
 4. Create `cookie.txt` in this format:
 
@@ -242,7 +238,7 @@ Works with Clash, V2Ray, Shadowsocks, or any HTTP proxy.
 
 ```python
 resp = client.chat.completions.create(
-    model="gemini-3.5-flash",
+    model="gemini-3.6-flash",
     messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
     tools=[{
         "type": "function",
@@ -287,7 +283,7 @@ python probe_upstream.py
 ## Requirements
 
 - Python 3.8+
-- `httpx` (`pip install httpx`) — used for streaming requests
+- `httpx` (`pip install httpx`) - used for streaming requests
 - Network access to `gemini.google.com` (proxy/VPN may be needed in some regions)
 
 ## How It Works
@@ -308,9 +304,9 @@ MIT
 
 ## 致谢
 
-本项目的开发 agent 能力由 [GenericAgent](https://github.com/lsdefine/GenericAgent) 提供。
+本项目 agent 部分参考 [GenericAgent](https://github.com/lsdefine/GenericAgent)
 
-### 🚩 友情链接
+### 项目地址
 
 [![GenericAgent](https://img.shields.io/badge/Agent_Framework-GenericAgent-orange?style=for-the-badge&logo=github)](https://github.com/lsdefine/GenericAgent)
 [![LinuxDo](https://img.shields.io/badge/社区-LinuxDo-blue?style=for-the-badge)](https://linux.do/)
